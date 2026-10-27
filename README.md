@@ -40,6 +40,21 @@ OpenAI/Anthropic-API) на реальном тексте.
 
 ## Быстрый старт
 
+По умолчанию все скрипты стучатся на движок `http://localhost:8082`.
+Чтобы гонять на произвольном хосте/порту, передай `URL`:
+
+```bash
+# другой порт на этой машине
+URL=http://localhost:8085 ./bench-real-prefill-prepare.sh
+URL=http://localhost:8085 ./bench-real-prefill.sh
+URL=http://localhost:8085 ./bench-parallel-decode.py --concurrency 2
+
+# движок на другой машине
+URL=http://192.168.1.50:8080 ./bench-real-prefill.sh
+```
+
+Стандартный запуск (движок на :8082):
+
 ```bash
 # 1. Сгенерировать чанки (нужен запущенный движок — размеры считаются его токенизатором)
 ./bench-real-prefill-prepare.sh
@@ -123,14 +138,15 @@ decode tok/s (клиент и движок), MTP accept, суммарный tok/
 промпт), `--max-tokens`, `--data-dir`, `--chunk-depth` (из какой глубины брать
 чанки), `--solo`, `--timeout`, `--verbose`.
 
+Хост/порт движка — `--url` (или env `URL`), по умолчанию `http://localhost:8082`:
+
+```bash
+./bench-parallel-decode.py --url http://192.168.1.50:8085 --concurrency 2
+URL=http://localhost:8085 ./bench-parallel-decode.py --concurrency 2
+```
+
 Смысл: `--parallel` у движка даёт прирост агрегата, но каждый поток платит
 долей; сравнение соло vs N показывает реальную выгоду многопоточки.
-
-## Чего в репо нет
-
-`realdata/chunks/` и `manifest.json` не коммитятся — они зависят от токенизатора
-конкретного движка и генерируются prepare-скриптом за ~минуту. Логи прогонов
-(`*.log`, `*.txt` с таймингами) тоже локальные.
 
 ## Лицензия источников
 
