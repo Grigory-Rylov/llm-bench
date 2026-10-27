@@ -1,0 +1,4 @@
+realdata/chunks/
+realdata/manifest.json
+realdata/*.log
+*.log
