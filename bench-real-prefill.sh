@@ -197,6 +197,8 @@ for depth in DEPTHS:
     if not QUIET:
         print(f"\n========== {label.upper()} (depth={depth}, {len(files)} chunk(s), one per run) ==========")
     warmup(depth)
+    if QUIET:
+        print(f"\n{depth//1000}k")
     if DECODE_PROBE == "1" and DECODE_RUNS > 0 and files:
         if not QUIET:
             print(f"\n=== decode probe [{label}] (continuation, target={DECODE_TOKENS} tokens) ===")
