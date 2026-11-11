@@ -43,14 +43,49 @@ def get_model(url):
         return json.load(r)["data"][0]["id"]
 
 
-def load_chunk(data_dir, depth, idx, n_chunks):
-    """Чанк для потока idx: отдельный файл на поток, чтобы тексты не пересекались."""
+MISSING_CHUNKS = set()
+SOLO_BASE = 200  # solo-слоты живут отдельно от parallel-слотов, см. --chunk-offset
+
+
+def chunk_names(depth, idx, solo_run=None):
+    """Имена чанков, в которых стоит искать слот idx.
+
+    - `<depth>-<idx>.txt` — числовые слоты: их строит make-chunks.py, их
+      столько, сколько нужно слотов (prepare на глубину даёт только 6);
+    - `<depth>-d<run+1>.txt` — выделенные decode-чанки prepare, ровно для
+      solo-базы: их текст больше никем не занят;
+    - `<depth>-a.txt` … — буквенные чанки prepare (обратная совместимость).
+    """
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    names = [f"{depth}-{idx}.txt"]
+    if solo_run is not None:
+        names.append(f"{depth}-d{solo_run + 1}.txt")
+    names.append(f"{depth}-{letters[idx % 26]}.txt")
+    return names
+
+
+def load_chunk(data_dir, depth, idx, solo_run=None):
+    """Чанк для слота idx: отдельный файл на слот, чтобы тексты не пересекались.
+
+    Пропуск — loud. Филлер на части потоков сравнивать с остальными нельзя:
+    все они получают ОДНО И ТО ЖЕ тело (salt в префиксе контекст-кэш strata не
+    бьёт), и эти потоки меряются не на том тексте, что остальные.
+    """
     if not data_dir:
         return None
-    letters = "abcdefghijklmnopqrstuvwxyz"
-    name = f"{depth}-{letters[idx % len(letters)]}.txt"
-    path = os.path.join(data_dir, "chunks", name)
-    return open(path, encoding="utf-8").read() if os.path.exists(path) else None
+    for name in chunk_names(depth, idx, solo_run):
+        path = os.path.join(data_dir, "chunks", name)
+        if os.path.exists(path):
+            return open(path, encoding="utf-8").read()
+    if (depth, idx) not in MISSING_CHUNKS:
+        MISSING_CHUNKS.add((depth, idx))
+        print(f"WARN: слот {idx} на глубине {depth} не найден (пробовал "
+              f"{', '.join(chunk_names(depth, idx, solo_run))}) — этот поток "
+              f"поедет на филлер и с остальными не сравним. Дострой чанки: "
+              f"./make-chunks.py --depth {depth} --ranges 0-N; либо зови "
+              f"--chunk-depth с глубиной, которую готовил prepare.",
+              file=sys.stderr)
+    return None
 
 
 def filler(depth):
@@ -199,6 +234,10 @@ def main():
                     help="глубина чанков реального текста (по умолчанию = --depth)")
     ap.add_argument("--solo", action="store_true",
                     help="сначала базовая линия: 1 поток, те же прогоны")
+    ap.add_argument("--chunk-offset", type=int, default=0,
+                    help="смещение слотов чанков: разные прогоны скрипта не должны "
+                         "переиспользовать текст (соль кэш strata не бьёт). "
+                         "solo берёт слоты offset+SOLO_BASE+run")
     ap.add_argument("--timeout", type=float, default=600)
     ap.add_argument("--verbose", action="store_true", help="добавить comp в строки")
     args = ap.parse_args()
@@ -226,7 +265,11 @@ def main():
         print(f"\n=== solo (1 поток, {args.runs} прогонов) ===")
         solo_all = []
         for run in range(args.runs):
-            text = load_chunk(data_dir, chunk_depth, run, 26) if data_dir else None
+            # solo живёт в отдельном диапазоне слотов: иначе его текст
+            # совпал бы с текстом потока 0..runs-1 первого parallel-прогона
+            text = load_chunk(data_dir, chunk_depth,
+                              args.chunk_offset + SOLO_BASE + run,
+                              solo_run=run) if data_dir else None
             prompt = build_prompt(text, args.depth, args.max_tokens)
             r, _ = run_batch(args.url, model, [prompt], args.max_tokens,
                              args.timeout, f"solo-{run+1}", args.verbose)
@@ -244,7 +287,7 @@ def main():
         for p in range(args.concurrency):
             # у каждого потока свой чанк: файлы -a -b -c... не пересекаются
             text = load_chunk(data_dir, chunk_depth,
-                              run * args.concurrency + p, 26) if data_dir else None
+                              args.chunk_offset + run * args.concurrency + p) if data_dir else None
             prompts.append(build_prompt(text, args.depth, args.max_tokens))
         r, _ = run_batch(args.url, model, prompts, args.max_tokens,
                          args.timeout, f"par-{run+1}", args.verbose)
