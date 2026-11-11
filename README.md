@@ -40,8 +40,10 @@ URL=http://192.168.1.50:8080 ./bench-real-prefill.sh
 ./bench-real-prefill.sh
 
 # 3. Параллельный декод: 2 потока против соло-базы
-./bench-parallel-decode.py --solo --runs 2
-./bench-parallel-decode.py --concurrency 2 --runs 3
+#    --chunk-depth обязателен: чанки prepare лежат на 40k/150k/200k, а
+#    --depth по умолчанию 4000 — без него чанков нет и бенч уедет на филлер
+./bench-parallel-decode.py --solo --runs 2 --chunk-depth 40000
+./bench-parallel-decode.py --concurrency 2 --runs 3 --chunk-depth 40000
 ```
 
 ## Требования
@@ -117,15 +119,35 @@ decode tok/s (клиент и движок), MTP accept, суммарный tok/
 чанки (`realdata/chunks`), у потока свой чанк и соль.
 
 ```bash
-./bench-parallel-decode.py --solo --runs 2              # база: 1 поток
-./bench-parallel-decode.py --concurrency 2 --runs 3     # 2 потока
-./bench-parallel-decode.py --concurrency 4 --depth 20000 --max-tokens 256
-./bench-parallel-decode.py --concurrency 2 --verbose    # + completion-метрики
+./bench-parallel-decode.py --solo --runs 2 --chunk-depth 40000           # база: 1 поток
+./bench-parallel-decode.py --concurrency 2 --runs 3 --chunk-depth 40000  # 2 потока
+./bench-parallel-decode.py --concurrency 4 --chunk-depth 40000 --max-tokens 256
+./bench-parallel-decode.py --concurrency 2 --verbose --chunk-depth 40000 # + completion-метрики
 ```
 
 Флаги: `--url`, `--model`, `--concurrency`, `--runs`, `--depth` (токенов в
-промпт), `--max-tokens`, `--data-dir`, `--chunk-depth` (из какой глубины брать
-чанки), `--solo`, `--timeout`, `--verbose`.
+промпт, работает только на филлере — чанк подаётся целиком), `--max-tokens`,
+`--data-dir`, `--chunk-depth` (из какой глубины брать чанки), `--chunk-offset`
+(см. ниже), `--solo`, `--timeout`, `--verbose`.
+
+### Сколько нужно чанков
+
+Нужно `--runs` × `--concurrency` непересекающихся чанков (плюс `--runs` на
+соло-базу — она берёт выделенные decode-чанки `-d1…`, а если их нет, то свои
+числовые слоты). prepare на глубину даёт шесть: `-a -b -c -d1 -d2 -d3`, чего
+хватает на `--concurrency 2 --runs 3`, но не больше. Дальше — `make-chunks.py`.
+
+Непересекаются не зря: контекст-кэш strata матчит **тело** запроса, соль в
+префиксе его не бьёт. Повторно поданный чанк обслуживается из кэша, и этот
+поток начинает мерять не то же самое, что соседи. Поэтому:
+
+* слоты solo и parallel разведены (`--chunk-offset` задаёт базу для всего
+  прогона, solo живёт в своём диапазоне) — иначе текст соло-базы совпадал бы с
+  текстом потоков 0..runs-1 первого parallel-прогона;
+* не хватает чанка — бенч громко пишет в stderr и говорит, что достроить. Молча
+  сесть на филлер на двух потоках из восьми значит получить красивую, но
+  несопоставимую таблицу: на повторённой фразе MTP принимает драфты в полтора-два
+  раза жаднее, и декод выглядит вдвое быстрее реального текста.
 
 Хост/порт движка — `--url` (или env `URL`), по умолчанию `http://localhost:8082`:
 
@@ -136,6 +158,27 @@ URL=http://localhost:8085 ./bench-parallel-decode.py --concurrency 2
 
 Смысл: `--parallel` у движка даёт прирост агрегата, но каждый поток платит
 долей; сравнение соло vs N показывает реальную выгоду многопоточки.
+
+## make-chunks.py
+
+Достраивает ещё N непересекающихся чанков поверх тех, что сделал prepare
+(числовые слоты `realdata/chunks/<depth>-<slot>.txt`), и дописывает их в
+`manifest.json`. Курсоры по книгам стартуют за край всего уже использованного —
+тексты не пересекаются ни между собой, ни с чанками prepare. Токены считаются
+токенизатором движка, как в prepare.
+
+```bash
+# 12 слотов под --concurrency 4 --runs 3, плюс соло-базе в своём диапазоне
+URL=http://localhost:8082 ./make-chunks.py --depth 40000 --ranges 0-11,200-202
+./bench-parallel-decode.py --concurrency 4 --runs 3 --depth 40000 --chunk-offset 0
+# второй запуск того же профиля — в другой диапазон, иначе второй прогон
+# попадёт в кэш первого
+./bench-parallel-decode.py --concurrency 4 --runs 3 --depth 40000 --chunk-offset 1000
+```
+
+После сборки вытесняет собранные тексты из контекст-кэша движка (сборка
+прогоняет их через `count_tokens`, и первый же промпл иначе дал бы
+`cached=N/N`); отключить — `FLUSH=0`.
 
 ## Лицензия источников
 
